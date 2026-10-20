@@ -4,6 +4,7 @@ import { Activity, ArrowRight, Atom, BookOpen, Brain, CheckCircle2, ChevronRight
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 
 type SessionUser = { id: string; email?: string };
+type StudentProfile = { display_name: string | null; target_exam_year: number | null; target_score: number | null; daily_study_minutes: number | null };
 
 const subjects = [
   { name: 'Biology', chapters: 'Botany & Zoology', progress: 0, icon: Leaf, tone: 'green' },
@@ -20,6 +21,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [profile, setProfile] = useState<StudentProfile>({ display_name: '', target_exam_year: 2028, target_score: 600, daily_study_minutes: 180 });
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileLoaded, setProfileLoaded] = useState(false);
 
   useEffect(() => {
     if (!supabase) return;
@@ -29,6 +33,32 @@ export default function App() {
     });
     return () => data.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function loadProfile() {
+      if (!supabase || !user) { setProfileLoaded(false); return; }
+      setProfileLoaded(false);
+      const { data, error: profileError } = await supabase.from('profiles').select('display_name,target_exam_year,target_score,daily_study_minutes').eq('id', user.id).maybeSingle();
+      if (!active) return;
+      if (data) setProfile({ display_name: data.display_name ?? '', target_exam_year: data.target_exam_year ?? 2028, target_score: data.target_score ?? 600, daily_study_minutes: data.daily_study_minutes ?? 180 });
+      if (profileError) setError('Your account is signed in, but the profile could not load. Check that the database setup has been applied.');
+      setProfileLoaded(true);
+    }
+    void loadProfile();
+    return () => { active = false; };
+  }, [user?.id]);
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase || !user) return;
+    setProfileBusy(true); setError(''); setNotice('');
+    const payload = { id: user.id, display_name: profile.display_name?.trim() || null, target_exam_year: Number(profile.target_exam_year), target_score: Number(profile.target_score), daily_study_minutes: Number(profile.daily_study_minutes), updated_at: new Date().toISOString() };
+    const { error: saveError } = await supabase.from('profiles').upsert(payload, { onConflict: 'id' });
+    setProfileBusy(false);
+    if (saveError) { setError('Could not save your study goals. Check the database setup and try again.'); return; }
+    setNotice('Your study goals have been saved.');
+  }
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -74,6 +104,11 @@ export default function App() {
       </header>
 
       <main>
+        {user && <section className="dashboard-section" aria-labelledby="dashboard-title">
+          <div className="dashboard-welcome"><div><span className="eyebrow muted">YOUR PERSONAL STUDY SPACE</span><h1 id="dashboard-title">{profile.display_name?.trim() ? `Welcome, ${profile.display_name.trim()}.` : 'Welcome back.'}</h1><p>Your plan starts with small, repeatable steps. Set your targets here; we'll connect real study activity as the next features are built.</p></div><div className="dashboard-badge"><GraduationCap size={20}/><span>NEET preparation</span></div></div>
+          <div className="dashboard-metrics"><article><span className="dash-metric-icon"><BookOpen size={18}/></span><small>Chapters completed</small><strong>0</strong><span>Study library coming next</span></article><article><span className="dash-metric-icon"><Target size={18}/></span><small>Target score</small><strong>{profile.target_score ?? 600}<em>/720</em></strong><span>Your personal goal</span></article><article><span className="dash-metric-icon"><Clock3 size={18}/></span><small>Daily study target</small><strong>{Math.round((profile.daily_study_minutes ?? 180) / 60 * 10) / 10}<em> hrs</em></strong><span>Planned time, not tracked time</span></article></div>
+          <div className="dashboard-columns"><section className="dashboard-panel"><div className="dashboard-panel-heading"><div><span className="eyebrow muted">YOUR TARGETS</span><h2>Make this plan yours.</h2></div><span className="panel-step">01</span></div><form className="profile-form" onSubmit={saveProfile}><label htmlFor="display-name">What should we call you?</label><input id="display-name" value={profile.display_name ?? ''} onChange={e => setProfile(p => ({...p,display_name:e.target.value}))} placeholder="Your name" maxLength={80}/><div className="profile-fields"><div><label htmlFor="exam-year">Target NEET year</label><select id="exam-year" value={profile.target_exam_year ?? 2028} onChange={e => setProfile(p => ({...p,target_exam_year:Number(e.target.value)}))}>{Array.from({length:15},(_,i)=>2026+i).map(year=><option key={year} value={year}>{year}</option>)}</select></div><div><label htmlFor="target-score">Target score / 720</label><input id="target-score" type="number" min="0" max="720" value={profile.target_score ?? 600} onChange={e => setProfile(p => ({...p,target_score:Number(e.target.value)}))} required/></div></div><label htmlFor="daily-minutes">Daily study target (minutes)</label><input id="daily-minutes" type="number" min="0" max="1440" step="15" value={profile.daily_study_minutes ?? 180} onChange={e => setProfile(p => ({...p,daily_study_minutes:Number(e.target.value)}))} required/><button className="button button-primary" disabled={profileBusy || !profileLoaded}>{profileBusy ? 'Saving…' : 'Save my goals'} <ArrowRight size={16}/></button>{!profileLoaded && <p className="profile-help">Loading your saved profile…</p>}</form>{error && <p className="form-error" role="alert">{error}</p>}</section><section className="dashboard-panel next-panel"><span className="eyebrow muted">UP NEXT</span><h2>Your study journey</h2><div className="next-step"><span className="next-number">1</span><div><b>Build your foundation</b><p>Choose a subject and explore its chapters.</p></div><LockKeyhole size={16}/></div><div className="next-step"><span className="next-number">2</span><div><b>Practise with purpose</b><p>Attempt questions and review explanations.</p></div><LockKeyhole size={16}/></div><div className="next-step"><span className="next-number">3</span><div><b>Track your progress</b><p>See strengths, gaps and revision priorities.</p></div><LockKeyhole size={16}/></div><p className="dashboard-note">These learning features are not available yet. We're building them next.</p></section></div>
+        </section>}
         <section className="hero">
           <div className="hero-copy">
             <div className="eyebrow"><span className="live-dot" /> YOUR NEET JOURNEY, ONE STEP AT A TIME</div>
