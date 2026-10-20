@@ -1,10 +1,24 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Activity, ArrowRight, Atom, BookOpen, Brain, CheckCircle2, ChevronRight, Clock3, FlaskConical, GraduationCap, Leaf, LockKeyhole, LogIn, Mail, ShieldCheck, Sparkles, Target, Trophy, X } from 'lucide-react';
+import { Activity, ArrowRight, Atom, BookOpen, Brain, CalendarDays, CheckCircle2, ChevronRight, Clock3, FlaskConical, GraduationCap, Leaf, LockKeyhole, LogIn, Mail, Pause, Play, ShieldCheck, Sparkles, Target, Trophy, X } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 
 type SessionUser = { id: string; email?: string };
 type StudentProfile = { display_name: string | null; target_exam_year: number | null; target_score: number | null; daily_study_minutes: number | null };
+type DayPlan = { day: string; enabled: boolean; start: string; end: string };
+type StudySession = { id: string; started_at: string; session_type: string };
+
+const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const motivation = [
+  'Your future self is built by the next honest hour.',
+  'A difficult chapter today is a weaker fear tomorrow.',
+  'You do not need a perfect day. You need a real start.',
+  'Every reviewed mistake gives your next attempt an advantage.',
+  '600 is a target, not magic. Let the evidence show the way.',
+  'Consistency is quiet until the score makes it visible.',
+  'Study for understanding first; speed will grow from familiarity.'
+];
+const defaultSchedule = days.map((day, i) => ({ day, enabled: i < 5, start: i < 5 ? '19:00' : '09:00', end: i < 5 ? '23:00' : '21:00' }));
 
 const subjects = [
   { name: 'Biology', chapters: 'Botany & Zoology', progress: 0, icon: Leaf, tone: 'green' },
@@ -24,8 +38,22 @@ export default function App() {
   const [profile, setProfile] = useState<StudentProfile>({ display_name: '', target_exam_year: 2028, target_score: 600, daily_study_minutes: 180 });
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileLoaded, setProfileLoaded] = useState(false);
+  const [schedule, setSchedule] = useState<DayPlan[]>(defaultSchedule);
+  const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata');
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [activeSession, setActiveSession] = useState<StudySession | null>(null);
+  const [sessionType, setSessionType] = useState('Focused study');
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
+  const [sessionSeconds, setSessionSeconds] = useState(0);
+  const [confirmationState, setConfirmationState] = useState<'none' | 'confirmed' | 'error'>('none');
+  const [quote] = useState(() => motivation[Math.floor(Math.random() * motivation.length)]);
+  const [attempts, setAttempts] = useState<Array<{ score: number; duration_seconds: number | null; created_at: string }>>([]);
 
   useEffect(() => {
+    if (window.location.hash.includes('access_token=') && (window.location.hash.includes('type=signup') || window.location.hash.includes('type=email_change'))) {
+      setConfirmationState('confirmed');
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+    }
     if (!supabase) return;
     supabase.auth.getSession().then(({ data }) => setUser(data.session?.user ?? null));
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -39,13 +67,21 @@ export default function App() {
     async function loadProfile() {
       if (!supabase || !user) { setProfileLoaded(false); return; }
       setProfileLoaded(false);
-      const { data, error: profileError } = await supabase.from('profiles').select('display_name,target_exam_year,target_score,daily_study_minutes').eq('id', user.id).maybeSingle();
+      const { data, error: profileError } = await supabase.from('profiles').select('display_name,target_exam_year,target_score,daily_study_minutes,study_timezone,weekly_schedule').eq('id', user.id).maybeSingle();
       if (!active) return;
-      if (data) setProfile({ display_name: data.display_name ?? '', target_exam_year: data.target_exam_year ?? 2028, target_score: data.target_score ?? 600, daily_study_minutes: data.daily_study_minutes ?? 180 });
+      if (data) {
+        setProfile({ display_name: data.display_name ?? '', target_exam_year: data.target_exam_year ?? 2028, target_score: data.target_score ?? 600, daily_study_minutes: data.daily_study_minutes ?? 180 });
+        if (data.study_timezone) setTimezone(data.study_timezone);
+        if (Array.isArray(data.weekly_schedule) && data.weekly_schedule.length === 7) setSchedule(data.weekly_schedule);
+      }
       if (profileError) setError('Your account is signed in, but the profile could not load. Check that the database setup has been applied.');
       setProfileLoaded(true);
     }
     void loadProfile();
+    if (supabase && user) {
+      void supabase.from('study_sessions').select('id,started_at,session_type').eq('user_id', user.id).is('ended_at', null).order('started_at', { ascending: false }).limit(1).maybeSingle().then(({ data }) => { if (active && data) { setActiveSession(data as StudySession); setSessionStartedAt(new Date(data.started_at).getTime()); } });
+      void supabase.from('test_attempts').select('score,duration_seconds,created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(10).then(({ data }) => { if (active && data) setAttempts(data); });
+    }
     return () => { active = false; };
   }, [user?.id]);
 
@@ -53,11 +89,56 @@ export default function App() {
     event.preventDefault();
     if (!supabase || !user) return;
     setProfileBusy(true); setError(''); setNotice('');
-    const payload = { id: user.id, display_name: profile.display_name?.trim() || null, target_exam_year: Number(profile.target_exam_year), target_score: Number(profile.target_score), daily_study_minutes: Number(profile.daily_study_minutes), updated_at: new Date().toISOString() };
+    const payload = { id: user.id, display_name: profile.display_name?.trim() || null, target_exam_year: Number(profile.target_exam_year), target_score: Number(profile.target_score), daily_study_minutes: Number(profile.daily_study_minutes), study_timezone: timezone, weekly_schedule: schedule, updated_at: new Date().toISOString() };
     const { error: saveError } = await supabase.from('profiles').upsert(payload, { onConflict: 'id' });
     setProfileBusy(false);
     if (saveError) { setError('Could not save your study goals. Check the database setup and try again.'); return; }
     setNotice('Your study goals have been saved.');
+  }
+
+
+  async function saveSchedule() {
+    if (!supabase || !user) return;
+    setScheduleBusy(true); setError(''); setNotice('');
+    const { error: scheduleError } = await supabase.from('profiles').update({ study_timezone: timezone, weekly_schedule: schedule, updated_at: new Date().toISOString() }).eq('id', user.id);
+    setScheduleBusy(false);
+    if (scheduleError) { setError('Calendar setup is not available in the database yet. Apply the latest migration, then try again.'); return; }
+    setNotice('Your weekly study calendar has been saved.');
+  }
+
+  async function startStudySession() {
+    if (!supabase || !user) return;
+    setError('');
+    const started = new Date();
+    const { data, error: startError } = await supabase.from('study_sessions').insert({ user_id: user.id, session_type: sessionType, started_at: started.toISOString(), timezone }).select('id,started_at,session_type').single();
+    if (startError) { setError('Study tracking needs the latest database migration before it can start.'); return; }
+    setActiveSession(data as StudySession); setSessionStartedAt(started.getTime()); setSessionSeconds(0);
+    setNotice('Session started. Keep this tab open while you work; online presence alone cannot prove that you are studying.');
+  }
+
+  async function stopStudySession() {
+    if (!supabase || !user || !activeSession || !sessionStartedAt) return;
+    const ended = new Date();
+    const duration = Math.max(1, Math.round((ended.getTime() - sessionStartedAt) / 1000));
+    const { error: stopError } = await supabase.from('study_sessions').update({ ended_at: ended.toISOString(), duration_seconds: duration, status: 'completed' }).eq('id', activeSession.id).eq('user_id', user.id);
+    if (stopError) { setError('Could not save this session. Please try again.'); return; }
+    setActiveSession(null); setSessionStartedAt(null); setSessionSeconds(0);
+    setNotice(`Study session saved: ${Math.round(duration / 60)} minutes.`);
+  }
+
+  useEffect(() => {
+    if (!activeSession || !sessionStartedAt) return;
+    const tick = () => setSessionSeconds(Math.max(0, Math.floor((Date.now() - sessionStartedAt) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSession?.id, sessionStartedAt]);
+
+  function formatSeconds(total: number) {
+    const h = Math.floor(total / 3600).toString().padStart(2, '0');
+    const m = Math.floor((total % 3600) / 60).toString().padStart(2, '0');
+    const s = (total % 60).toString().padStart(2, '0');
+    return h + ':' + m + ':' + s;
   }
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
@@ -71,7 +152,7 @@ export default function App() {
     setBusy(true);
     try {
       if (authMode === 'signup') {
-        const { error: authError } = await supabase.auth.signUp({ email, password });
+        const { error: authError } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: window.location.origin } });
         if (authError) throw authError;
         setNotice('Check your inbox for the verification email. After verifying, return here to sign in.');
       } else {
@@ -104,8 +185,9 @@ export default function App() {
       </header>
 
       <main>
+        {confirmationState !== 'none' && <section className={'confirmation-banner ' + (confirmationState === 'confirmed' ? 'confirmation-success' : '')}><div className="confirmation-icon"><CheckCircle2 size={25}/></div><div><span className="eyebrow">EMAIL CONFIRMATION</span><h2>{confirmationState === 'confirmed' ? 'You’re confirmed. Your next chapter starts now.' : 'We could not confirm that link.'}</h2><p>{confirmationState === 'confirmed' ? quote : 'Try signing in. If your email is verified, you can continue to your study dashboard.'}</p></div><button className="button button-dark" onClick={() => { setConfirmationState('none'); setAuthOpen(true); setAuthMode('signin'); }}>{confirmationState === 'confirmed' ? 'Go to my study space' : 'Sign in'} <ArrowRight size={16}/></button></section>}
         {user && <section className="dashboard-section" aria-labelledby="dashboard-title">
-          <div className="dashboard-welcome"><div><span className="eyebrow muted">YOUR PERSONAL STUDY SPACE</span><h1 id="dashboard-title">{profile.display_name?.trim() ? `Welcome, ${profile.display_name.trim()}.` : 'Welcome back.'}</h1><p>Your plan starts with small, repeatable steps. Set your targets here; we'll connect real study activity as the next features are built.</p></div><div className="dashboard-badge"><GraduationCap size={20}/><span>NEET preparation</span></div></div>
+          <div className="dashboard-welcome"><div><span className="eyebrow muted">YOUR PERSONAL STUDY SPACE</span><h1 id="dashboard-title">{profile.display_name?.trim() ? `Welcome, ${profile.display_name.trim()}.` : 'Welcome back.'}</h1><p>{quote}</p></div><div className="dashboard-badge"><GraduationCap size={20}/><span>NEET preparation</span></div></div>
           <div className="dashboard-metrics"><article><span className="dash-metric-icon"><BookOpen size={18}/></span><small>Chapters completed</small><strong>0</strong><span>Study library coming next</span></article><article><span className="dash-metric-icon"><Target size={18}/></span><small>Target score</small><strong>{profile.target_score ?? 600}<em>/720</em></strong><span>Your personal goal</span></article><article><span className="dash-metric-icon"><Clock3 size={18}/></span><small>Daily study target</small><strong>{Math.round((profile.daily_study_minutes ?? 180) / 60 * 10) / 10}<em> hrs</em></strong><span>Planned time, not tracked time</span></article></div>
           <div className="dashboard-columns"><section className="dashboard-panel"><div className="dashboard-panel-heading"><div><span className="eyebrow muted">YOUR TARGETS</span><h2>Make this plan yours.</h2></div><span className="panel-step">01</span></div><form className="profile-form" onSubmit={saveProfile}><label htmlFor="display-name">What should we call you?</label><input id="display-name" value={profile.display_name ?? ''} onChange={e => setProfile(p => ({...p,display_name:e.target.value}))} placeholder="Your name" maxLength={80}/><div className="profile-fields"><div><label htmlFor="exam-year">Target NEET year</label><select id="exam-year" value={profile.target_exam_year ?? 2028} onChange={e => setProfile(p => ({...p,target_exam_year:Number(e.target.value)}))}>{Array.from({length:15},(_,i)=>2026+i).map(year=><option key={year} value={year}>{year}</option>)}</select></div><div><label htmlFor="target-score">Target score / 720</label><input id="target-score" type="number" min="0" max="720" value={profile.target_score ?? 600} onChange={e => setProfile(p => ({...p,target_score:Number(e.target.value)}))} required/></div></div><label htmlFor="daily-minutes">Daily study target (minutes)</label><input id="daily-minutes" type="number" min="0" max="1440" step="15" value={profile.daily_study_minutes ?? 180} onChange={e => setProfile(p => ({...p,daily_study_minutes:Number(e.target.value)}))} required/><button className="button button-primary" disabled={profileBusy || !profileLoaded}>{profileBusy ? 'Saving…' : 'Save my goals'} <ArrowRight size={16}/></button>{!profileLoaded && <p className="profile-help">Loading your saved profile…</p>}</form>{error && <p className="form-error" role="alert">{error}</p>}</section><section className="dashboard-panel next-panel"><span className="eyebrow muted">UP NEXT</span><h2>Your study journey</h2><div className="next-step"><span className="next-number">1</span><div><b>Build your foundation</b><p>Choose a subject and explore its chapters.</p></div><LockKeyhole size={16}/></div><div className="next-step"><span className="next-number">2</span><div><b>Practise with purpose</b><p>Attempt questions and review explanations.</p></div><LockKeyhole size={16}/></div><div className="next-step"><span className="next-number">3</span><div><b>Track your progress</b><p>See strengths, gaps and revision priorities.</p></div><LockKeyhole size={16}/></div><p className="dashboard-note">These learning features are not available yet. We're building them next.</p></section></div>
         </section>}
